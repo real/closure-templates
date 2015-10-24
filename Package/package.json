@@ -1,0 +1,23 @@
+{
+  "name": "closure-templates",
+  "version": "20151008.0.0",
+  "keywords": [
+    "javascript",
+    "closure",
+    "build",
+    "soy",
+    "templates"
+  ],
+  "description": "Pre-built closure-templates JAR files packaged for NPM",
+  "homepage": "https://github.com/real/closure-templates",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/real/closure-templates.git"
+  },
+  "license": "Apache-2.0",
+  "main": "soyfiles.js",
+  "scripts": {
+    "test": "cd .. && mvn test",
+    "prepublish": "cd .. && ./build-package.sh"
+  }
+}
