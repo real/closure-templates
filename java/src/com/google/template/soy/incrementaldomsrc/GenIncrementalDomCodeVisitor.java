@@ -22,8 +22,7 @@ import com.google.common.collect.Maps;
 import com.google.inject.Inject;
 import com.google.template.soy.basetree.ParentNode;
 import com.google.template.soy.data.SanitizedContent.ContentKind;
-import com.google.template.soy.error.ErrorReporter;
-import com.google.template.soy.error.SoyError;
+import com.google.template.soy.error.SoyErrorKind;
 import com.google.template.soy.exprtree.ExprNode;
 import com.google.template.soy.exprtree.ExprRootNode;
 import com.google.template.soy.exprtree.VarRefNode;
@@ -46,6 +45,7 @@ import com.google.template.soy.jssrc.internal.JsExprTranslator;
 import com.google.template.soy.jssrc.internal.JsSrcUtils;
 import com.google.template.soy.jssrc.restricted.JsExpr;
 import com.google.template.soy.shared.internal.CodeBuilder;
+import com.google.template.soy.soytree.CallBasicNode;
 import com.google.template.soy.soytree.CallNode;
 import com.google.template.soy.soytree.CallParamContentNode;
 import com.google.template.soy.soytree.CallParamNode;
@@ -71,8 +71,10 @@ import java.util.List;
  */
 public final class GenIncrementalDomCodeVisitor extends GenJsCodeVisitor {
 
-  private static final SoyError PRINT_ATTR_INVALID_KIND = SoyError.of("Cannot have a print "
-      + "statement in an attributes list of kind {0}, it must be of kind attributes.");
+  private static final SoyErrorKind PRINT_ATTR_INVALID_KIND =
+      SoyErrorKind.of(
+          "Cannot have a print "
+              + "statement in an attributes list of kind {0}, it must be of kind attributes.");
 
   private static final String NAMESPACE_EXTENSION = ".incrementaldom";
 
@@ -85,18 +87,16 @@ public final class GenIncrementalDomCodeVisitor extends GenJsCodeVisitor {
       CanInitOutputVarVisitor canInitOutputVarVisitor,
       GenJsExprsVisitorFactory genJsExprsVisitorFactory,
       GenDirectivePluginRequiresVisitor genDirectivePluginRequiresVisitor,
-      SoyTypeOps typeOps,
-      ErrorReporter errorReporter) {
-    super(jsSrcOptions,
-        true,
+      SoyTypeOps typeOps) {
+    super(
+        jsSrcOptions,
         jsExprTranslator,
         genCallCodeUtils,
         isComputableAsJsExprsVisitor,
         canInitOutputVarVisitor,
         genJsExprsVisitorFactory,
         genDirectivePluginRequiresVisitor,
-        typeOps,
-        errorReporter);
+        typeOps);
   }
 
   @Override protected CodeBuilder<JsExpr> createCodeBuilder() {
@@ -125,6 +125,18 @@ public final class GenIncrementalDomCodeVisitor extends GenJsCodeVisitor {
       .appendLine("var ie_open_end = IncrementalDom.elementOpenEnd;")
       .appendLine("var itext = IncrementalDom.text;")
       .appendLine("var iattr = IncrementalDom.attr;");
+  }
+
+  @Override protected String getTemplateReturnType(TemplateNode node) {
+    // TODO(sparhami) need to deal with URI types properly (like the JS code gen does) so that the
+    // usage is safe. For now, don't include any return type so compilation will fail if someone
+    // tries to create a template of kind="uri".
+    if (node.getContentKind() == ContentKind.TEXT) {
+      return "string";
+    }
+
+    // This template does not return any content but rather contains Incremental DOM instructions.
+    return "void";
   }
 
   @Override protected void visitTemplateNode(TemplateNode node) {
@@ -223,6 +235,9 @@ public final class GenIncrementalDomCodeVisitor extends GenJsCodeVisitor {
   }
 
   @Override protected void visitCallNode(CallNode node) {
+    Preconditions.checkState(node instanceof CallBasicNode, "Delegate template calls not yet "
+        + "supported for Incremental DOM.");
+
     // If this node has any CallParamContentNode children those contents are not computable as JS
     // expressions, visit them to generate code to define their respective 'param<n>' variables.
     for (CallParamNode child : node.getChildren()) {
@@ -231,16 +246,26 @@ public final class GenIncrementalDomCodeVisitor extends GenJsCodeVisitor {
       }
     }
 
-    JsExpr callExpr = genCallCodeUtils.genCallExpr(node, localVarTranslations, templateAliases);
-
-    // If the template is of kind="html" or kind="attributes", we just want to
-    // invoke the template call so that it renders the HTML in the current
-    // location. For text templates, we always want to concatenate the result
-    // to the output variable.
+    JsExpr callExpr =
+        genCallCodeUtils.genCallExpr(node, localVarTranslations, templateAliases, errorReporter);
     IncrementalDomCodeBuilder jsCodeBuilder = getJsCodeBuilder();
-    if (isTextContent(jsCodeBuilder.getContentKind())) {
+    String templateName = ((CallBasicNode)node).getCalleeName();
+    ContentKind currentContentKind = jsCodeBuilder.getContentKind();
+    ContentKind callContentKind = templateRegistry.getBasicTemplate(templateName).getContentKind();
+
+    // TODO(sparhami) Need to also check the current context to make sure things like calls to
+    // attributes are not placed where HTML / text is expected. Incremental DOM has runtime asserts,
+    // but better to catch it at compile time.
+    if (isTextContent(currentContentKind)) {
+      // If the current content kind (due to a let, param or template) is a text, simply
+      // concatentate the result of the call to the current output variable.
       jsCodeBuilder.addToOutputVar(ImmutableList.of(callExpr));
+    } else if (isTextContent(callContentKind)) {
+      // The function returns a string, wrap it with itext so that a Text node is generated.
+      jsCodeBuilder.appendLine("itext(", callExpr.getText(), ");");
     } else {
+      // The function contains Incremental DOM instructions that need to be run at the current
+      // location in the DOM, so just invoke it.
       jsCodeBuilder.appendLine(callExpr.getText() + ";");
     }
   }
